@@ -20,4 +20,30 @@ class QiblaCalculator {
 
     return bearing;
   }
+
+  // Status kesejajaran (shaf) terhadap arah kiblat, dari selisih heading
+  // kompas saat ini terhadap bearing kiblat. Toleransi default 3° dianggap lurus.
+  static ShafResult calculateShaf(
+    double qiblaBearing,
+    double currentHeading, {
+    double tolerance = 3,
+  }) {
+    double diff = (qiblaBearing - currentHeading) % 360;
+    if (diff > 180) diff -= 360;
+    if (diff < -180) diff += 360;
+
+    if (diff.abs() <= tolerance) {
+      return ShafResult("Shaf Lurus", diff);
+    } else if (diff > 0) {
+      return ShafResult("Geser Kanan ${diff.toStringAsFixed(1)}°", diff);
+    } else {
+      return ShafResult("Geser Kiri ${(-diff).toStringAsFixed(1)}°", diff);
+    }
+  }
+}
+
+class ShafResult {
+  final String label;
+  final double offsetDeg;
+  const ShafResult(this.label, this.offsetDeg);
 }

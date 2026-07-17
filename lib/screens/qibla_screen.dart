@@ -3,18 +3,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_compass/flutter_compass.dart';
 import 'dart:async';
 import '../services/qibla_bluetooth.dart';
+import '../services/qibla_calculator.dart';
 import '../widgets/status_card.dart';
 import '../widgets/qibla_compass.dart';
 import '../utils/constants.dart';
 
 class QiblaScreen extends StatefulWidget {
-  final double lat, lng, qibla;
+  final double lat, lng, qibla, declination;
   final String locationName;
 
   const QiblaScreen({
     required this.lat,
     required this.lng,
     required this.qibla,
+    required this.declination,
     required this.locationName,
     super.key,
   });
@@ -37,6 +39,12 @@ class _QiblaScreenState extends State<QiblaScreen> {
 
   // Adjusted Qibla angle (calculated based on current BNO heading)
   double adjustedQiblaAngle = 0.0;
+
+  // Deklinasi magnetik, dihitung lokal di app (magnetic_declination package)
+  late double declination = widget.declination;
+
+  // Status kesejajaran shaf, dihitung dari selisih bnoHeading vs bearing kiblat
+  ShafResult shaf = const ShafResult("Menghitung...", 0);
 
   @override
   void initState() {
@@ -68,12 +76,14 @@ class _QiblaScreenState extends State<QiblaScreen> {
           bnoHeading = heading;
           // Update adjusted qibla angle berdasarkan BNO heading terkini
           adjustedQiblaAngle = _calculateAdjustedQiblaAngle(heading);
+          shaf = QiblaCalculator.calculateShaf(widget.qibla, heading);
         });
       }
     });
 
-    // Initialize adjusted qibla angle
+    // Initialize adjusted qibla angle & shaf
     adjustedQiblaAngle = _calculateAdjustedQiblaAngle(bnoHeading);
+    shaf = QiblaCalculator.calculateShaf(widget.qibla, bnoHeading);
   }
 
   @override
@@ -96,19 +106,46 @@ class _QiblaScreenState extends State<QiblaScreen> {
     return angle;
   }
 
-  void _sendQiblaAngle() async {
+  // Tombol 1: kirim sudut kiblat saja — format *<bearing>K
+  void _sendBearingOnly() async {
     setState(() {
       isSending = true;
-      response = "Mengirim...";
+      response = "Mengirim sudut kiblat...";
     });
-
     try {
-      // Kirim adjusted qibla angle dengan normalisasi ke 0-360
-      double normalizedAngle = adjustedQiblaAngle % 360;
-      if (normalizedAngle < 0) {
-        normalizedAngle += 360;
-      }
-      await QiblaBluetooth.sendQiblaAngle(normalizedAngle);
+      await QiblaBluetooth.sendQiblaBearing(widget.qibla);
+    } catch (e) {
+      setState(() {
+        response = "Error: $e";
+        isSending = false;
+      });
+    }
+  }
+
+  // Tombol 2: kirim deklinasi + lokasi saja — format *<decl>D <lat>L <lng>N
+  void _sendDeclinationLocationOnly() async {
+    setState(() {
+      isSending = true;
+      response = "Mengirim deklinasi & lokasi...";
+    });
+    try {
+      await QiblaBluetooth.sendDeclinationLocation(declination, widget.lat, widget.lng);
+    } catch (e) {
+      setState(() {
+        response = "Error: $e";
+        isSending = false;
+      });
+    }
+  }
+
+  // Kirim semua data lengkap (gabungan tombol 1 + tombol 2)
+  void _sendAll() async {
+    setState(() {
+      isSending = true;
+      response = "Mengirim semua data...";
+    });
+    try {
+      await QiblaBluetooth.sendAllData(widget.qibla, declination, widget.lat, widget.lng);
     } catch (e) {
       setState(() {
         response = "Error: $e";
@@ -163,12 +200,52 @@ class _QiblaScreenState extends State<QiblaScreen> {
               ),
             ),
 
+            SizedBox(height: 12),
+
+            // Tombol 2: kirim deklinasi + lokasi saja
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: isSending ? null : _sendDeclinationLocationOnly,
+                icon: Icon(Icons.location_on, color: AppColors.primary),
+                label: Text(
+                  "Kirim Deklinasi + Lokasi",
+                  style: TextStyle(color: AppColors.primary, fontSize: 14),
+                ),
+                style: OutlinedButton.styleFrom(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  side: BorderSide(color: AppColors.primary, width: 1.5),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+            ),
+
             SizedBox(height: 20),
 
             // WIDGET COMPASS → MENGGUNAKAN bnoHeading (dari ESP32 BNO055)
             QiblaCompass(
               qiblaDirection: adjustedQiblaAngle,
               currentHeading: bnoHeading,
+            ),
+
+            SizedBox(height: 12),
+
+            // Tombol 1: kirim sudut kiblat saja
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: isSending ? null : _sendBearingOnly,
+                icon: Icon(Icons.explore, color: AppColors.accent),
+                label: Text(
+                  "Kirim Sudut Kiblat",
+                  style: TextStyle(color: AppColors.accent, fontSize: 14),
+                ),
+                style: OutlinedButton.styleFrom(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  side: BorderSide(color: AppColors.accent, width: 1.5),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
             ),
 
             SizedBox(height: 20),
@@ -207,6 +284,22 @@ class _QiblaScreenState extends State<QiblaScreen> {
 
             // Status Cards
             StatusCard(
+              title: "Status Shaf",
+              value: shaf.label,
+              icon: shaf.label == "Shaf Lurus" ? Icons.check_circle : Icons.swap_horiz,
+            ),
+
+            SizedBox(height: 20),
+
+            StatusCard(
+              title: "Deklinasi Magnetik",
+              value: "${declination.toStringAsFixed(2)}°",
+              icon: Icons.explore,
+            ),
+
+            SizedBox(height: 20),
+
+            StatusCard(
               title: "Respon ESP32",
               value: response,
               icon: Icons.device_hub,
@@ -236,7 +329,7 @@ class _QiblaScreenState extends State<QiblaScreen> {
         width: double.infinity,
         height: 56,
         child: FloatingActionButton.extended(
-          onPressed: isSending ? null : _sendQiblaAngle,
+          onPressed: isSending ? null : _sendAll,
           backgroundColor: isSending ? Colors.grey[400] : AppColors.accent,
           elevation: 6,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -251,7 +344,7 @@ class _QiblaScreenState extends State<QiblaScreen> {
                 ),
               if (isSending) const SizedBox(width: 12),
               Text(
-                isSending ? "Mengirim..." : "Kirim ke ESP32",
+                isSending ? "Mengirim..." : "Kirim Semua Data Lengkap",
                 style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
               ),
               if (!isSending) ...[

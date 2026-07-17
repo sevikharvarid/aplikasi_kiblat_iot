@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'dart:async';
 import 'package:geocoding/geocoding.dart';
+import 'package:magnetic_declination/magnetic_declination.dart';
 import '../services/location_service.dart';
 import '../services/qibla_calculator.dart';
 import '../services/qibla_bluetooth.dart';
@@ -21,7 +22,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool isScanning = false;
   List<ScanResult> devices = [];
   String status = "Tekan tombol untuk scan Bluetooth";
-  double? lat, lng, qibla;
+  double? lat, lng, qibla, declination;
   String? locationName;
   
   bool isLocationEnabled = false;
@@ -39,7 +40,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         setState(() => status = msg);
       }
     });
-    
+
     _checkInitialStatus();
     _startStatusMonitoring();
   }
@@ -117,6 +118,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  // Hitung deklinasi magnetik lokal (WMM) — gak perlu nunggu ESP32.
+  Future<double> _getDeclination(double latitude, double longitude, double altitude) async {
+    try {
+      return await MagneticDeclination.calculateDeclination(
+        latitude,
+        longitude,
+        altitude,
+        DateTime.now(),
+      );
+    } catch (e) {
+      print("Error calculating declination: $e");
+      return 0;
+    }
+  }
+
   // Get Location with full checks
   Future<void> _getLocationOnly() async {
     try {
@@ -131,14 +147,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       
       final pos = await LocationService.getCurrentLocation();
       final angle = QiblaCalculator.calculate(pos.latitude, pos.longitude);
-      
+
       // Get real location name from coordinates
       String realLocationName = await _getLocationName(pos.latitude, pos.longitude);
+      double decl = await _getDeclination(pos.latitude, pos.longitude, pos.altitude);
 
       setState(() {
         lat = pos.latitude;
         lng = pos.longitude;
         qibla = angle;
+        declination = decl;
         locationName = realLocationName;
         status = "Lokasi berhasil diambil";
       });
@@ -208,14 +226,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() => status = "Mengambil lokasi...");
       final pos = await LocationService.getCurrentLocation();
       final angle = QiblaCalculator.calculate(pos.latitude, pos.longitude);
-      
+
       // Get real location name from coordinates
       String realLocationName = await _getLocationName(pos.latitude, pos.longitude);
+      double decl = await _getDeclination(pos.latitude, pos.longitude, pos.altitude);
 
       setState(() {
         lat = pos.latitude;
         lng = pos.longitude;
         qibla = angle;
+        declination = decl;
         locationName = realLocationName;
         status = "Berhasil terhubung";
       });
@@ -227,6 +247,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             lat: lat!,
             lng: lng!,
             qibla: qibla!,
+            declination: declination ?? 0,
             locationName: locationName!,
           ),
         ),
@@ -248,6 +269,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             lat: lat!,
             lng: lng!,
             qibla: qibla!,
+            declination: declination ?? 0,
             locationName: locationName ?? "Unknown",
           ),
         ),
@@ -361,6 +383,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         "${lat!.toStringAsFixed(6)}, ${lng!.toStringAsFixed(6)}",
                         style: TextStyle(fontSize: 12, color: Colors.grey[600]),
                       ),
+                      SizedBox(height: 4),
+                      Text(
+                        "Deklinasi: ${declination?.toStringAsFixed(2) ?? '-'}°",
+                        style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                      ),
                       SizedBox(height: 10),
                       Container(
                         padding: EdgeInsets.symmetric(horizontal: 20, vertical: 10),
@@ -436,7 +463,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ),
               ),
             ),
-            
+
             // Show Qibla Direction Button
             if (lat != null && lng != null && qibla != null) ...[
               SizedBox(height: 10),

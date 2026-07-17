@@ -23,41 +23,54 @@ class QiblaBluetooth {
     }
   }
 
-  // === SEND QIBLA ANGLE TO ESP32 ===
-  static Future<void> sendQiblaAngle(double qiblaAngle) async {
-    final simulator = await isSimulator;
-    if (simulator) {
-      await Future.delayed(Duration(milliseconds: 500));
-      responseController.add("STATUS:Streaming BNO Data");
-      await Future.delayed(Duration(milliseconds: 100));
-      responseController.add("BNO:Ready");
-      
-      // Simulasi streaming BNO untuk simulator
-      _simulateBNOStream();
-      return;
-    }
-
-    if (device != null && device!.isConnected) {
+  static Future<void> _writeRaw(String payload) async {
+    if (device != null && device!.isConnected && writeChar != null) {
       try {
-        // Format: "xxx.xx\n" (contoh: "294.50\n")
-        String data = "${qiblaAngle.toStringAsFixed(2)}\n";
-        List<int> bytes = utf8.encode(data);
-        
-        if (writeChar != null) {
-          await writeChar!.write(bytes, withoutResponse: false);
-          print("✅ Qibla angle sent: $data");
-        } else {
-          print("⚠️ No write characteristic found");
-          responseController.add("ERROR: No write characteristic");
-        }
+        await writeChar!.write(utf8.encode(payload), withoutResponse: false);
+        print("✅ Data sent: $payload");
       } catch (e) {
-        print("❌ Error sending qibla: $e");
+        print("❌ Error sending data: $e");
         responseController.add("ERROR: $e");
       }
     } else {
       print("⚠️ Device not connected");
       responseController.add("ERROR: Device not connected");
     }
+  }
+
+  // === TOMBOL 1: Kirim sudut kiblat === format: *<bearing>K
+  static Future<void> sendQiblaBearing(double bearing) async {
+    final simulator = await isSimulator;
+    final payload = "*${bearing.toStringAsFixed(1)}K\n";
+
+    if (simulator) {
+      responseController.add("STATUS:Sudut kiblat terkirim (simulasi)");
+      _simulateBNOStream(); // biar compass tetap bergerak di simulator
+      return;
+    }
+    await _writeRaw(payload);
+  }
+
+  // === TOMBOL 2: Kirim deklinasi + lokasi === format: *<decl>D <lat>L <lng>N
+  static Future<void> sendDeclinationLocation(
+      double declination, double lat, double lng) async {
+    final simulator = await isSimulator;
+    final payload =
+        "*${declination.toStringAsFixed(1)}D ${lat.toStringAsFixed(6)}L ${lng.toStringAsFixed(6)}N\n";
+
+    if (simulator) {
+      responseController.add("STATUS:Deklinasi & lokasi terkirim (simulasi)");
+      return;
+    }
+    await _writeRaw(payload);
+  }
+
+  // === Kirim semua data lengkap (gabungan tombol 1 + tombol 2) ===
+  static Future<void> sendAllData(
+      double bearing, double declination, double lat, double lng) async {
+    await sendQiblaBearing(bearing);
+    await Future.delayed(const Duration(milliseconds: 150));
+    await sendDeclinationLocation(declination, lat, lng);
   }
 
   static Future<void> startScan() async {
@@ -191,9 +204,12 @@ class QiblaBluetooth {
     }
   }
 
+  static Timer? _bnoSimTimer;
+
   static void _simulateBNOStream() {
+    _bnoSimTimer?.cancel(); // jangan biarkan timer lama masih jalan bareng yang baru
     double simulatedHeading = 0.0;
-    Timer.periodic(Duration(milliseconds: 100), (timer) {
+    _bnoSimTimer = Timer.periodic(Duration(milliseconds: 100), (timer) {
       simulatedHeading += 1.5;
       if (simulatedHeading >= 360.0) {
         simulatedHeading = 0.0;

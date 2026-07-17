@@ -1,300 +1,289 @@
-# Enhancement Spec — Kompas Digital Penunjuk Kiblat dengan Koreksi Utara Sejati
+# Implementasi Deklinasi — v3 (spec client / Alternatif B, single-packet)
 
-**Status:** Draft eksekusi + dasar penulisan metodologi tesis
-**Platform:** Flutter (Android) ⇄ BLE ⇄ ESP32 + motor + sensor kompas (magnetometer)
-**Ringkasan 1 kalimat:** App menghitung deklinasi magnetik dari GPS + tanggal, menampilkannya, lalu mengirim koreksi ke ESP32 supaya alat mengarah ke **utara sejati** dulu, baru ke **kiblat**.
-
----
-
-## 0. Perubahan dari Kondisi Existing
-
-| Existing | Enhancement (target) |
-|---|---|
-| Sensor kompas kirim heading ke app | Tetap, tapi heading mentah (0–360, **0 = utara magnetik**, bukan utara sejati) |
-| App hitung arah kiblat | Tetap |
-| Tombol "Kirim ke ESP32" via Bluetooth | Tetap |
-| — | **+ Ambil lat/lng dari GPS HP** (otomatis) |
-| — | **+ Ambil tanggal-bulan-tahun-jam** (otomatis dari device) |
-| — | **+ Hitung nilai deklinasi** (koreksi utara sejati) |
-| — | **+ Tombol "Deklinasi"** (opsional; bisa otomatis) |
-| — | **+ Tampilkan Latitude, Longitude, Deklinasi di layar app** |
-
-**Inti masalah:** sensor kompas kasih `0°` di utara **magnetik**. Utara **sejati** (geografis) berbeda sebesar **deklinasi (D)**. Untuk kiblat yang benar, arah harus dihitung dari utara sejati, jadi:
-
-```
-heading_sejati = (heading_sensor + D) mod 360
-```
+> **Repo:** `sevikharvarid/aplikasi_kiblat_iot` · **Sensor:** BNO055 (fusion onboard) · **Protokol:** plain-text
+> **Prinsip:** App **cuma kirim data** (lat, lng, tanggal) + **menampilkan** balasan. **ESP32 yang menghitung deklinasi** (WMM_Tinier).
 
 ---
 
-## 1. Nilai Deklinasi dari Mana? (Jawaban Library)
+## 0. KOREKSI ARSITEKTUR (baca ini dulu)
 
-Deklinasi dihitung dari **World Magnetic Model (WMM)** — model resmi NOAA/BGS yang dirilis tiap 5 tahun. Inputnya: **lintang, bujur, (tinggi ≈ 0), dan tanggal**.
+Versi lama dokumen ini keliru: mengira **app** yang hitung deklinasi. Sesuai kata client, yang benar:
 
-### Opsi Flutter (dipakai)
+| | Alternatif A (versi lama, salah) | **Alternatif B (spec client, dipakai)** |
+|---|---|---|
+| Yang hitung deklinasi | App (package `magnetic_declination`) | **ESP32 (WMM_Tinier)** |
+| Yang dikirim app → ESP32 | nilai deklinasi | **lat + lng + tanggal/jam** |
+| Deklinasi buat ditampilkan | dihitung app | **diterima balik dari ESP32** |
+| Alur | fire-once | **bertahap / handshake** |
 
-| Library | Cara kerja | Kelebihan | Kekurangan |
+Kutipan client yang jadi acuan:
+- *"aplikasi langsung mengirim data lokasi (lintang, bujur) dan tanggal"* → app kirim **lat, lng, tanggal**.
+- *"ESP32 memakai data ini untuk menghitung deklinasi lewat WMM_Tinier"* → **ESP32 yang hitung**.
+- *"Alat mengirim sinyal balik... Android baru mengirim data kedua (bearing kiblat)"* → **handshake bertahap**.
+
+**Efek ke app:** package `magnetic_declination` **tidak wajib** lagi. App tidak menghitung apa pun soal deklinasi — hanya kirim lat/lng/tanggal, lalu terima & tampilkan nilai deklinasi dari ESP32.
+
+---
+
+## 1. Peran App (final)
+
+1. Ambil **lat, lng** dari GPS HP (`LocationService` — sudah ada).
+2. Ambil **tanggal/jam** dari jam HP (`DateTime.now()`).
+3. Kirim `lat + lng + tanggal` ke ESP32 → memicu **Tahap 1** (ESP32 hitung deklinasi + gerak ke utara sejati).
+4. Terima balik dari ESP32: **nilai deklinasi** + sinyal **"utara sejati siap"**.
+5. **Tampilkan** lat, lng, deklinasi.
+6. Setelah dapat sinyal siap → kirim **bearing kiblat** (angka tetap `widget.qibla`) → **Tahap 2 & 3**.
+
+> App **tidak** menghitung deklinasi dan **tidak** mengoreksi bearing kiblat. Itu semua di firmware.
+
+---
+
+## 2. Kontrak Protokol BLE (sepakati dengan tim firmware)
+
+**App kirim SEMUA data dalam satu paket, ESP32 yang pisah pakai separator.** (Tidak perlu handshake bertahap dari sisi app.)
+
+| Arah | Pesan | Arti | Status |
 |---|---|---|---|
-| **`magnetic_declination`** ✅ | Wrapper native: Android pakai `GeomagneticField`, iOS pakai CoreLocation | Paling simpel, tanpa file koefisien | Butuh device asli (native), bukan pure-Dart |
-| `geomag` | Pure Dart, port geomagJS, pakai koefisien WMM | Offline, lintas platform, akurasi ±0.2° | Data bawaan lama (WMM-2015v2) → ganti .COF ke WMM2025 |
+| App → ESP32 | `KIBLAT:<lat>|<lng>|<ISO8601>|<bearing>\n` | lat, lng, tanggal/jam, bearing kiblat — sekaligus | **BARU** |
+| ESP32 → App | `DECL:<derajat>\n` | hasil hitung deklinasi (buat ditampilkan) | **BARU** |
+| ESP32 → App | `STATUS:NORTH_LOCKED\n` | (opsional) info sudah di utara sejati | **BARU** |
+| ESP32 → App | `BNO:<derajat>\n` | stream heading BNO055 | *existing* |
+| ESP32 → App | `STATUS:...\n` | pesan status umum | *existing* |
 
-### Opsi ESP32 (kalau tetap mau hitung di alat)
-- `WMM_Tinier` (yang kamu sebut) atau `bolderflight/wmm` (Arduino/CMake). Butuh koefisien di firmware.
+Contoh paket: `KIBLAT:-6.234567|106.987654|2026-07-14T15:30:00.000|294.50\n`
 
-### ⚠️ Catatan penting untuk lokasi kamu
-Deklinasi di **Jakarta/Bekasi ≈ +0.64°** (sangat kecil, ke timur). Jadi angka contoh **+12° → target sensor 348°** itu **ilustratif** saja; nilai real di lokasimu mendekati nol. Untuk tesis, deklinasi tetap **wajib dibahas** sebagai koreksi metodologis walau praktisnya kecil.
+> **Separator `|` (pipe)** dipilih karena tidak muncul di field mana pun (lat/lng/bearing = angka; tanggal ISO8601 = angka + `-` `:` `T` `.`). Koma juga aman kalau tim ESP lebih suka. Formatnya fleksibel — **tim ESP yang final memutuskan cara pisahnya**.
 
----
-
-## 2. Keputusan Arsitektur — 2 Alternatif
-
-### 🅰️ Alternatif A — Deklinasi dihitung di APP **(REKOMENDASI)**
-- App: ambil GPS + tanggal → hitung `D` pakai `magnetic_declination` → **tampilkan lat/lng/D** → kirim `D` (satu angka) ke ESP32.
-- ESP32: cukup terima `D` dan `bearing_kiblat`. Tidak perlu WMM_Tinier, tidak proses lat/lng/tanggal. Firmware simpel.
-- **Cocok karena** requirement "tampilkan deklinasi di app" langsung terpenuhi tanpa hitung dobel.
-
-### 🅱️ Alternatif B — Deklinasi dihitung di ESP32
-- App kirim lat/lng/tanggal → ESP32 hitung `D` via WMM_Tinier → **kirim `D` balik ke app** untuk ditampilkan.
-- Lebih rumit (WMM di mikrokontroler + roundtrip data), tapi alat "self-sufficient".
-
-> **Tentang "kalau pakai GPS aplikasi ga perlu revisi":** benar untuk **sumber lokasi** — lat/lng datang dari GPS HP otomatis, jadi tidak ada input manual. Yang tetap perlu ditambahkan hanyalah logika hitung + tampil deklinasi (bukan revisi besar). Sediakan fallback **input manual lat/lng** kalau GPS mati/indoor.
-
-**Dokumen ini memakai Alternatif A sebagai basis.**
+**Yang harus dikunci bareng hardware:**
+1. Separator apa (`|` / `,` / lainnya) dan urutan field: **lat, lng, tanggal, bearing**.
+2. Firmware pisah paket → ambil lat/lng/tanggal → hitung deklinasi (WMM_Tinier) → balas `DECL:` (buat app tampilkan).
+3. Firmware simpan `bearing` (dari paket yang sama) → dipakai nanti di Tahap 2, tidak dikoreksi apa pun.
+4. Bearing = **angka tetap absolut** (0–360), firmware yang hitung rute terpendek.
 
 ---
 
-## 3. Protokol Komunikasi BLE
+## 3. Ringkasan perubahan file
 
-Format pesan sederhana (JSON per baris atau CSV). Contoh JSON:
+| File | Perubahan |
+|---|---|
+| `pubspec.yaml` | **Tidak perlu** `magnetic_declination` (deklinasi di ESP32). |
+| `services/qibla_bluetooth.dart` | + `sendLocationDate()`, + stream `declinationController`, + parse `DECL:` di notify, + helper `runQiblaSequence()` (handshake). |
+| `screens/home_screen.dart` | Kirim `LOC` saat konek, listen `declinationController`, simpan `declination`, oper ke QiblaScreen. |
+| `screens/qibla_screen.dart` | Terima `declination`, tampilkan (StatusCard + `icon`), tombol kirim pakai `runQiblaSequence()`. |
 
-**App → ESP32 (Tahap 1, kirim koreksi utara sejati):**
-```json
-{ "cmd": "SET_NORTH", "declination": 0.64 }
-```
-
-**ESP32 → App (selesai Tahap 1, sudah di utara sejati):**
-```json
-{ "status": "NORTH_LOCKED" }
-```
-
-**App → ESP32 (Tahap 2, kirim arah kiblat):**
-```json
-{ "cmd": "SET_QIBLA", "bearing": 295.15 }
-```
-
-**ESP32 → App (selesai Tahap 3):**
-```json
-{ "status": "QIBLA_LOCKED", "heading": 295.15 }
-```
-
-> `bearing` kiblat = angka tetap hasil geometri lokasi→Ka'bah, **tidak pernah dikoreksi apa pun** (deklinasi hanya untuk mencari utara sejati, bukan untuk bearing kiblat).
+**File `declination_service.dart` dari versi lama: HAPUS / tidak dipakai.**
 
 ---
 
-## 4. Mekanisme Kerja 3 Tahap (untuk Metodologi Tesis)
+## 4. EDIT — `lib/services/qibla_bluetooth.dart`
 
-### TAHAP 1 — Menuju Utara Sejati
-Setelah Android terhubung ke ESP32 via BLE, app mengambil **lokasi (lat, lng)** dari GPS HP dan **tanggal** dari device, lalu menghitung **deklinasi magnetik (D)** menggunakan World Magnetic Model (library `magnetic_declination`). Nilai lat, lng, dan D **ditampilkan di layar app**, kemudian D dikirim ke ESP32.
-
-ESP32 masuk **loop koreksi**: membaca sensor kompas berulang, menghitung `heading_sejati = (heading_sensor + D) mod 360`, dan menggerakkan motor sedikit demi sedikit sampai `heading_sejati ≈ 0°`. Target sensor mentah = `(360 − D) mod 360` (contoh ilustratif: D = +12° → target 348°). Motor berhenti saat tercapai — **titik berhenti pertama: perangkat menghadap utara sejati.**
-
-### TAHAP 2 — Terima Data Kiblat
-ESP32 mengirim sinyal `NORTH_LOCKED` ke Android. Android baru mengirim data kedua: **bearing kiblat** (angka tetap dari geometri lokasi ke Ka'bah). Angka ini **tidak dikoreksi** apa pun.
-
-### TAHAP 3 — Menuju Kiblat
-ESP32 menghitung selisih antara bearing kiblat dan posisi sekarang (yang sudah 0° = utara sejati), lalu **normalisasi** agar motor mengambil rute terpendek. Motor berputar **langsung sekali gerak** menuju kiblat, berhenti di **titik berhenti kedua**, lalu **terus memantau**: jika ada pergeseran kecil, posisi dikoreksi otomatis tanpa mengulang Tahap 1.
-
-**Alur ringkas:**
-```
-BLE connect
-  → App: GPS + tanggal → hitung D → tampilkan → kirim D
-    → ESP32: loop (sensor + D) sampai heading_sejati ≈ 0°   [STOP 1: utara sejati]
-      → ESP32: kirim NORTH_LOCKED
-        → App: kirim bearing_kiblat
-          → ESP32: putar rute terpendek ke bearing_kiblat   [STOP 2: kiblat]
-            → ESP32: loop pemantauan drift (koreksi kecil otomatis)
-```
-
----
-
-## 5. Implementasi Flutter (snippet)
-
-### 5.1 Dependencies (`pubspec.yaml`)
-```yaml
-dependencies:
-  magnetic_declination: ^latest   # cek versi terbaru di pub.dev
-  geolocator: ^latest             # GPS lat/lng
-  flutter_blue_plus: ^latest       # BLE (atau flutter_reactive_ble)
-```
-
-### 5.2 Ambil lokasi + hitung deklinasi + tampilkan
+### 4a. Tambah stream deklinasi
+Di dekat deklarasi controller yang sudah ada:
 ```dart
-import 'package:geolocator/geolocator.dart';
-import 'package:magnetic_declination/magnetic_declination.dart';
-
-Future<Map<String, double>> getLocationAndDeclination() async {
-  // 1. GPS dari HP (pastikan izin & service aktif)
-  final pos = await Geolocator.getCurrentPosition(
-    desiredAccuracy: LocationAccuracy.high,
-  );
-
-  final lat = pos.latitude;
-  final lng = pos.longitude;
-  final date = DateTime.now();
-
-  // 2. Hitung deklinasi (altitude 0 → efeknya diabaikan)
-  final declination = await MagneticDeclination.calculateDeclination(
-    lat, lng, 0.0, date,
-  );
-
-  // 3. Nilai untuk ditampilkan di UI: lat, lng, declination
-  return {'lat': lat, 'lng': lng, 'declination': declination};
-}
+static StreamController<double> declinationController = StreamController.broadcast();
 ```
 
-### 5.3 Hitung bearing kiblat (great-circle ke Ka'bah)
+### 4b. Kirim SEMUA data sekaligus (lat + lng + tanggal + bearing)
 ```dart
-import 'dart:math';
+  static const String kSep = "|"; // separator — samakan dgn tim ESP
 
-// Koordinat Ka'bah
-const double kaabaLat = 21.4225;
-const double kaabaLng = 39.8262;
+  // === KIRIM SEMUA DATA SEKALIGUS: lat|lng|tanggal|bearing ===
+  static Future<void> sendAllData(
+      double lat, double lng, double bearing, {DateTime? date}) async {
+    final simulator = await isSimulator;
+    final iso = (date ?? DateTime.now()).toIso8601String();
 
-double qiblaBearing(double lat, double lng) {
-  final phi1 = lat * pi / 180;
-  final phi2 = kaabaLat * pi / 180;
-  final dLng = (kaabaLng - lng) * pi / 180;
+    final payload =
+        "KIBLAT:${lat.toStringAsFixed(6)}$kSep${lng.toStringAsFixed(6)}$kSep$iso$kSep${bearing.toStringAsFixed(2)}\n";
 
-  final y = sin(dLng);
-  final x = cos(phi1) * tan(phi2) - sin(phi1) * cos(dLng);
-  var brng = atan2(y, x) * 180 / pi;
-  return (brng + 360) % 360; // normalisasi 0–360
-}
-```
-
-### 5.4 Kirim via BLE (pseudocode)
-```dart
-// Tahap 1
-await bleWrite('{"cmd":"SET_NORTH","declination":$declination}');
-
-// Tunggu status NORTH_LOCKED dari ESP32 (listen notify) ...
-
-// Tahap 2
-final bearing = qiblaBearing(lat, lng);
-await bleWrite('{"cmd":"SET_QIBLA","bearing":$bearing}');
-```
-
----
-
-## 6. Implementasi ESP32 (pseudocode — Alternatif A)
-
-```cpp
-float declination = 0;        // diterima dari app (SET_NORTH)
-float qiblaBearing = 0;       // diterima dari app (SET_QIBLA)
-enum State { WAIT_NORTH, SEEK_NORTH, WAIT_QIBLA, SEEK_QIBLA, TRACK };
-State state = WAIT_NORTH;
-
-float readCompass();          // heading magnetik 0–360 dari magnetometer
-float normalize(float a){ a = fmod(a,360); return a<0? a+360 : a; }
-
-void loop() {
-  float sensor = readCompass();
-  float trueHeading = normalize(sensor + declination);
-
-  switch (state) {
-    case SEEK_NORTH:
-      // gerak pelan sampai trueHeading ≈ 0
-      if (fabs(trueHeading) <= TOL || fabs(trueHeading-360) <= TOL) {
-        motorStop();
-        bleNotify("{\"status\":\"NORTH_LOCKED\"}");
-        state = WAIT_QIBLA;
-      } else {
-        stepTowardZero(trueHeading);   // rute terpendek ke 0
-      }
-      break;
-
-    case SEEK_QIBLA: {
-      // sekarang trueHeading acuan; putar ke qiblaBearing rute terpendek
-      float diff = normalize(qiblaBearing - trueHeading);
-      if (diff > 180) diff -= 360;     // -180..180
-      if (fabs(diff) <= TOL) {
-        motorStop();
-        bleNotify("{\"status\":\"QIBLA_LOCKED\"}");
-        state = TRACK;
-      } else {
-        motorMove(diff);               // sekali gerak
-      }
-      break;
+    if (simulator) {
+      responseController.add("STATUS:Data diterima");
+      await Future.delayed(const Duration(milliseconds: 300));
+      declinationController.add(0.64);                 // dummy deklinasi
+      responseController.add("STATUS:NORTH_LOCKED");   // dummy info
+      return;
     }
 
-    case TRACK: {
-      // pantau drift, koreksi kecil tanpa ulang Tahap 1
-      float diff = normalize(qiblaBearing - trueHeading);
-      if (diff > 180) diff -= 360;
-      if (fabs(diff) > TOL) motorMove(diff);
-      break;
+    if (device != null && device!.isConnected && writeChar != null) {
+      try {
+        await writeChar!.write(utf8.encode(payload), withoutResponse: false);
+        print("✅ Data sent: $payload");
+      } catch (e) {
+        responseController.add("ERROR: $e");
+      }
+    } else {
+      responseController.add("ERROR: Device not connected");
     }
   }
+```
+
+### 4c. Parse `DECL:` di notify handler
+Di `discoverServices()`, di dalam `char.lastValueStream.listen(...)` yang sekarang mem-parse `BNO:`, tambahkan cabang `DECL:`. Ubah blok:
+```dart
+if (msg.startsWith("BNO:")) {
+  // ... existing parsing BNO ...
+} else {
+  responseController.add(msg.trim());
 }
-
-// onReceive SET_NORTH → declination = ...; state = SEEK_NORTH;
-// onReceive SET_QIBLA → qiblaBearing = ...; state = SEEK_QIBLA;
+```
+jadi:
+```dart
+if (msg.startsWith("BNO:")) {
+  // ... existing parsing BNO (biarkan) ...
+} else if (msg.startsWith("DECL:")) {
+  final v = double.tryParse(msg.substring(5).trim());
+  if (v != null) {
+    declinationController.add(v);
+    print("🧭 Declination diterima: $v°");
+  }
+} else {
+  responseController.add(msg.trim());
+}
 ```
 
-> `TOL` = toleransi (mis. 1–2°). Untuk Alternatif B, ganti input `SET_NORTH` jadi lat/lng/tanggal lalu hitung `declination` pakai WMM_Tinier di sini, dan kirim balik ke app untuk ditampilkan.
+### 4d. (Tidak perlu handshake lagi)
+Karena semua data dikirim dalam satu paket, **tidak ada** `runQiblaSequence`/tunggu `NORTH_LOCKED`. App cukup panggil `sendAllData(...)` sekali. ESP32 yang atur tahapannya internal (pakai bearing yang sudah ada di paket).
 
 ---
 
-## 7. Requirement Tampilan App
+## 5. EDIT — `lib/screens/home_screen.dart`
 
-Tampilkan minimal 3 nilai (real-time / setelah tombol ditekan):
+### 5a. State deklinasi
+```dart
+double? lat, lng, qibla, declination;
+```
 
-| Label | Sumber | Contoh |
-|---|---|---|
-| Latitude | GPS | -6.2xxx |
-| Longitude | GPS | 106.9xxx |
-| Deklinasi | WMM (`magnetic_declination`) | +0.64° |
-| *(opsional)* Bearing Kiblat | hitung geometri | ±295° |
-| *(opsional)* Heading sekarang | notify ESP32 | 0–360° |
+### 5b. Listen deklinasi dari ESP32 (di `initState`)
+```dart
+QiblaBluetooth.declinationController.stream.listen((d) {
+  if (mounted) setState(() => declination = d);
+});
+```
 
-Tombol: **[Ambil Lokasi & Deklinasi]** → **[Kirim ke ESP32 (Utara Sejati)]** → (auto) **[Kirim Kiblat]**.
+### 5c. Kirim LOC saat sudah konek
+Kirim data cukup dilakukan dari tombol di QiblaScreen (§6c). Kalau mau kirim otomatis begitu konek, di `_connectAndProceed()` setelah lokasi + `angle` didapat bisa panggil:
+```dart
+await QiblaBluetooth.sendAllData(pos.latitude, pos.longitude, angle);
+```
+(Deklinasi akan masuk lewat listener 5b lalu tampil otomatis.)
+
+### 5d. Tampilkan deklinasi (lat & lng SUDAH tampil di `:361`)
+Setelah baris koordinat:
+```dart
+Text(
+  "${lat!.toStringAsFixed(6)}, ${lng!.toStringAsFixed(6)}",
+  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+),
+```
+sisipkan:
+```dart
+SizedBox(height: 4),
+Text(
+  "Deklinasi: ${declination?.toStringAsFixed(2) ?? 'menunggu ESP32...'}°",
+  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+),
+```
+
+### 5e. Oper deklinasi ke QiblaScreen (2 tempat `Navigator.push`)
+```dart
+builder: (_) => QiblaScreen(
+  lat: lat!,
+  lng: lng!,
+  qibla: qibla!,
+  declination: declination ?? 0,
+  locationName: locationName ?? "Unknown",
+),
+```
 
 ---
 
-## 8. Checklist Revisi (yang harus dikerjakan)
+## 6. EDIT — `lib/screens/qibla_screen.dart`
 
-- [ ] Tambah permission + ambil GPS (`geolocator`) + fallback input manual lat/lng.
-- [ ] Ambil `DateTime.now()` untuk input WMM.
-- [ ] Integrasi `magnetic_declination`, hitung D.
-- [ ] UI: tampilkan Latitude, Longitude, Deklinasi.
-- [ ] Fungsi `qiblaBearing()` (rumus great-circle ke Ka'bah).
-- [ ] Definisikan format pesan BLE (SET_NORTH / SET_QIBLA / status).
-- [ ] Handler notify: tunggu `NORTH_LOCKED` sebelum kirim kiblat.
-- [ ] Firmware ESP32: state machine 3 tahap + normalisasi rute terpendek + mode TRACK.
-- [ ] Uji lapangan: bandingkan hasil alat vs aplikasi kiblat referensi.
+### 6a. Terima parameter + listen update deklinasi
+```dart
+final double lat, lng, qibla, declination;
+final String locationName;
+
+const QiblaScreen({
+  required this.lat,
+  required this.lng,
+  required this.qibla,
+  required this.declination,
+  required this.locationName,
+  super.key,
+});
+```
+Di `_QiblaScreenState`, tambah field + listener supaya nilai deklinasi tetap update kalau ESP32 kirim ulang:
+```dart
+double declination = 0;
+
+@override
+void initState() {
+  super.initState();
+  declination = widget.declination;
+  QiblaBluetooth.declinationController.stream.listen((d) {
+    if (mounted) setState(() => declination = d);
+  });
+  // ... listener existing lainnya ...
+}
+```
+
+### 6b. Tampilkan deklinasi (WAJIB `icon`)
+Dekat kartu "Respon ESP32" (~baris 209):
+```dart
+StatusCard(
+  title: "Deklinasi Magnetik",
+  value: "${declination.toStringAsFixed(2)}°",
+  icon: Icons.explore,   // WAJIB — StatusCard butuh icon
+),
+SizedBox(height: 20),
+```
+
+### 6c. Tombol kirim → pakai handshake + bearing TETAP
+Ubah `_sendQiblaAngle()`. Ganti:
+```dart
+double normalizedAngle = adjustedQiblaAngle % 360;
+if (normalizedAngle < 0) normalizedAngle += 360;
+await QiblaBluetooth.sendQiblaAngle(normalizedAngle);
+```
+jadi:
+```dart
+// Kirim SEMUA data sekaligus: lat, lng, tanggal, bearing kiblat TETAP
+await QiblaBluetooth.sendAllData(widget.lat, widget.lng, widget.qibla);
+```
+> Catatan: yang dikirim adalah **bearing kiblat tetap** (`widget.qibla`), bukan `adjustedQiblaAngle`. Panah on-screen (`adjustedQiblaAngle`) tetap dipakai hanya untuk tampilan visual.
 
 ---
 
-## 9. Rumus Pendukung (ringkas)
+## 7. Checklist eksekusi
 
-**Utara sejati dari sensor:**
-```
-heading_sejati = (heading_sensor + D) mod 360
-target_sensor_utara = (360 − D) mod 360
-```
+- [ ] Hapus `declination_service.dart` (tidak dipakai lagi)
+- [ ] `qibla_bluetooth.dart`: `declinationController`, `sendAllData()`, parse `DECL:`
+- [ ] `home_screen.dart`: state `declination`, listener, kirim `LOC` saat konek, tampilkan deklinasi, oper ke QiblaScreen
+- [ ] `qibla_screen.dart`: terima `declination`, listener, tampilkan (`StatusCard`+`icon`), tombol → `sendAllData()`
+- [ ] Sepakati separator + urutan field `KIBLAT:...` dan `DECL:` dengan tim firmware
+- [ ] Uji simulator dulu (dummy DECL 0.64 + NORTH_LOCKED), lalu device asli
 
-**Bearing kiblat (great-circle):**
-```
-θ = atan2( sin(Δλ),  cos(φ1)·tan(φ2) − sin(φ1)·cos(Δλ) )
-Δλ = λ_kabah − λ_user ;  φ1 = lat_user ;  φ2 = lat_kabah = 21.4225°
-bearing_kiblat = (θ_deg + 360) mod 360
-```
-
-**Rute terpendek (motor):**
-```
-diff = ((target − sekarang + 540) mod 360) − 180   // hasil −180..+180
-```
+### ✅ Cek requirement "lat, lng, deklinasi tampil di app"
+| Nilai | Sumber | Tampil di | Aksi |
+|---|---|---|---|
+| Latitude | GPS HP | Home `:361`, Qibla `:155` | ✅ sudah |
+| Longitude | GPS HP | Home `:361`, Qibla `:155` | ✅ sudah |
+| Deklinasi | **dihitung ESP32**, dikirim balik | Home §5d, Qibla §6b | tambah (wajib) |
 
 ---
 
-*Catatan sumber: nilai deklinasi Jakarta ≈ +0.64° dan model WMM2025 (epoch 2025–2030) untuk perhitungan 2026. Selalu verifikasi nilai real lokasi via NOAA Magnetic Field Calculator saat menulis tesis.*
+## 8. Untuk metodologi tesis (versi benar)
+
+1. App ambil **lat, lng** (GPS HP) + **tanggal/jam** (jam HP) + hitung **bearing kiblat** (geometri ke Ka'bah).
+2. App kirim **semua sekaligus** ke ESP32 via BLE dalam satu paket ber-separator (`KIBLAT:lat|lng|tanggal|bearing`). ESP32 yang memisah datanya.
+3. **ESP32** hitung **deklinasi** dengan **WMM_Tinier** (kalkulator murni), kirim nilainya balik ke app untuk ditampilkan.
+4. ESP32 (BNO055): `heading_sejati = heading_BNO + deklinasi` → motor gerak sampai utara sejati (Tahap 1), lalu kirim `NORTH_LOCKED`.
+5. ESP32 memakai **bearing kiblat** (yang sudah dikirim di paket awal) untuk Tahap 2–3: putar rute terpendek ke kiblat, lalu pantau drift.
+
+Peran app = **penyedia data lokasi/waktu + antarmuka tampilan**. Peran ESP32 = **komputasi deklinasi + kontrol motor**. Contoh 12°/348° ilustratif; deklinasi real Bekasi ≈ +0.64°.
+
+---
+
+### (Opsional) kalau mau app menampilkan deklinasi TANPA menunggu ESP32
+Bisa tambahkan `magnetic_declination` hanya untuk *preview* di app (hitung lokal buat ditampilkan lebih cepat), sementara ESP32 tetap hitung sendiri untuk motor. Tapi ini menyalahi "satu sumber hitung" dan bisa beda tipis antar-model WMM — **tidak disarankan** kecuali diperlukan untuk UX.
