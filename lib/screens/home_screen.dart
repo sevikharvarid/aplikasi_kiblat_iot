@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'dart:async';
 import 'package:geocoding/geocoding.dart';
-import 'package:magnetic_declination/magnetic_declination.dart';
+import 'package:geomag/geomag.dart';
 import '../services/location_service.dart';
 import '../services/qibla_calculator.dart';
 import '../services/qibla_bluetooth.dart';
@@ -24,7 +24,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   String status = "Tekan tombol untuk scan Bluetooth";
   double? lat, lng, qibla, declination;
   String? locationName;
-  
+
+  final GeoMag _geoMag = GeoMag();
+
   bool isLocationEnabled = false;
   bool isBluetoothEnabled = false;
   
@@ -118,17 +120,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  // Hitung deklinasi magnetik lokal (WMM) — gak perlu nunggu ESP32.
-  Future<double> _getDeclination(double latitude, double longitude, double altitude) async {
+  // Hitung deklinasi magnetik lokal (WMM, murni Dart) — gak perlu nunggu ESP32.
+  double _getDeclination(double latitude, double longitude, double altitudeMeters) {
     try {
-      return await MagneticDeclination.calculateDeclination(
-        latitude,
-        longitude,
-        altitude,
-        DateTime.now(),
-      );
+      final heightFeet = altitudeMeters / 0.3048; // geomag pakai satuan feet
+      final result = _geoMag.calculate(latitude, longitude, heightFeet, DateTime.now());
+      // Hindari "-0.0" (negative zero) saat dibulatkan 1 desimal — cuma artefak
+      // floating-point, bukan nilai beda; snap ke 0.0 murni kalau rounding-nya nol.
+      final rounded = double.parse(result.dec.toStringAsFixed(1));
+      return rounded == 0 ? 0.0 : result.dec;
     } catch (e) {
       print("Error calculating declination: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Gagal hitung deklinasi: $e")),
+        );
+      }
       return 0;
     }
   }
@@ -150,7 +157,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
       // Get real location name from coordinates
       String realLocationName = await _getLocationName(pos.latitude, pos.longitude);
-      double decl = await _getDeclination(pos.latitude, pos.longitude, pos.altitude);
+      double decl = _getDeclination(pos.latitude, pos.longitude, pos.altitude);
 
       setState(() {
         lat = pos.latitude;
@@ -229,7 +236,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
       // Get real location name from coordinates
       String realLocationName = await _getLocationName(pos.latitude, pos.longitude);
-      double decl = await _getDeclination(pos.latitude, pos.longitude, pos.altitude);
+      double decl = _getDeclination(pos.latitude, pos.longitude, pos.altitude);
 
       setState(() {
         lat = pos.latitude;

@@ -40,7 +40,7 @@ dependencies:
   flutter_compass: ^0.8.0
   flutter_launcher_icons: ^0.14.4
   geocoding: ^4.0.0
-  magnetic_declination: ^1.0.0
+  geomag: ^0.3.0
 
 dev_dependencies:
   flutter_test:
